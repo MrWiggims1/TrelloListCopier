@@ -1,29 +1,24 @@
-﻿using System.Diagnostics.CodeAnalysis;
+﻿using Manatee.Trello;
 using Microsoft.Extensions.Configuration;
-using TrelloDotNet;
-using TrelloDotNet.Model;
-using TrelloDotNet.Model.Options.GetCardOptions;
-using TrelloDotNet.Model.Options.MoveCardToBoardOptions;
-using TrelloDotNet.Model.Options.MoveCardToListOptions;
-using TrelloDotNet.Model.Search;
 
 internal class Program
 {
-    private static TrelloClient trelloClient = default!;
-    
     private static async Task Main(string[] args)
     {
         IConfiguration config = new ConfigurationBuilder()
             .AddJsonFile("appsettings.json")
             .Build();
-        
-        string? trelloApiKey = config.GetRequiredSection("TrelloApiKey").Value;
-        string? trelloUserToken = config.GetRequiredSection("TrelloUserToken").Value;
-        string?  templateBoard = config.GetRequiredSection("TemplateBoard").Value;
 
-        List<string> targetListNames = config.GetRequiredSection("TargetListNames").Get<List<string>>() ?? throw new ArgumentNullException(nameof(targetListNames));
-        List<string> destinationBoards = config.GetRequiredSection("DestinationBoards").Get<List<string>>() ?? throw new ArgumentNullException(nameof(destinationBoards));
+        string? trelloApiKey    = config.GetRequiredSection("TrelloApiKey").Value;
+        string? trelloUserToken = config.GetRequiredSection("TrelloUserToken").Value;
+        string? templateBoard   = config.GetRequiredSection("TemplateBoard").Value;
+
+        List<string> targetListNames       = config.GetRequiredSection("TargetListNames").Get<List<string>>() ??
+                                             throw new ArgumentNullException(nameof(targetListNames));
         
+        List<string> destinationBoardNames = config.GetRequiredSection("destinationBoardNames").Get<List<string>>() ??
+                                             throw new ArgumentNullException(nameof(destinationBoardNames));
+
         ArgumentNullException.ThrowIfNull(trelloApiKey);
         ArgumentNullException.ThrowIfNull(trelloUserToken);
         ArgumentNullException.ThrowIfNull(templateBoard);
@@ -31,52 +26,51 @@ internal class Program
         if (targetListNames.Distinct().Count() != targetListNames.Count)
             throw new ArgumentOutOfRangeException(nameof(targetListNames), "Target list names in configuration cannot have duplicate names");
 
-        TrelloClientOptions options = new TrelloClientOptions()
-        {
-            AllowDeleteOfBoards = false,
-            AllowDeleteOfOrganizations = false
-        };
-        
-        trelloClient = new TrelloClient(trelloApiKey, trelloUserToken, options);
+        if (destinationBoardNames.Distinct().Count() != destinationBoardNames.Count)
+            throw new ArgumentOutOfRangeException(nameof(destinationBoardNames), "Destination board names in configuration cannot have duplicate names");
 
         Console.WriteLine("Application starting");
-        
-        Member? member = await trelloClient.GetTokenMemberAsync();
-        
-        if (member is null)
+
+        TrelloAuthorization.Default.AppKey    = trelloApiKey;
+        TrelloAuthorization.Default.UserToken = trelloUserToken;
+
+        TrelloFactory factory = new TrelloFactory();
+        IMe? trelloClient = await factory.Me(TrelloAuthorization.Default);
+
+        if (trelloClient is null)
             throw new ArgumentException("Trello credentials are invalid");
-        
-        Console.WriteLine($"Logged in as {member.FullName}");
 
-        string templateBoardId;
+        Console.WriteLine($"Logged in as {trelloClient.FullName}");
 
-        SearchRequest searchRequest = new SearchRequest(templateBoard)
-        {
-            SearchBoards = true,
-            BoardFields = new SearchRequestBoardFields("url")
-        };
-        
-        SearchResult searchResult = await trelloClient.SearchAsync(searchRequest);
+        Board.DownloadedFields |= Board.Fields.Lists;
 
-        if (searchResult.Boards.Count == 0)
-        {
+        List.DownloadedFields |= List.Fields.Cards;
+        List.DownloadedFields |= List.Fields.Position;
+
+        Card.DownloadedFields |= Card.Fields.List;
+        Card.DownloadedFields |= Card.Fields.Position;
+
+
+        ISearch? templateSearch = factory.Search(templateBoard, null, SearchModelType.Boards, null, false, TrelloAuthorization.Default);
+
+        await templateSearch.Refresh();
+
+        IBoard? selectedBoard = null;
+
+        if (templateSearch.Boards.Count() == 0) 
             throw new ArgumentException($"Could not find {templateBoard}");
-        }
-        
-        if (searchResult.Boards.Count > 10)
-        {
+
+        if (templateSearch.Boards.Count() > 10) 
             throw new ArgumentException($"Too many boards called {templateBoard}");
-        }
-        
-        if (searchResult.Boards.Count > 1)
+
+        if (templateSearch.Boards.Count() > 1)
         {
             Console.WriteLine($"### multiple boards called {templateBoard} ###");
-            for (int i = 0; i < searchResult.Boards.Count; i++)
+            for (int i = 0; i < templateSearch.Boards.Count(); i++)
             {
-                Console.WriteLine($"[{i}] - {searchResult.Boards[i].Url}");
+                Console.WriteLine(
+                    $"[{i}] - {templateSearch.Boards.ElementAt(i).Name}: {templateSearch.Boards.ElementAt(i).Url}");
             }
-
-            Board? selectedBoard = null;
 
             while (selectedBoard is null or default(Board))
             {
@@ -84,138 +78,157 @@ internal class Program
                 ConsoleKeyInfo response = Console.ReadKey();
 
                 if (char.IsDigit(response.KeyChar))
-                {
-                    selectedBoard = searchResult.Boards.ElementAtOrDefault(int.Parse(response.KeyChar.ToString()));
-                }
+                    selectedBoard = templateSearch.Boards.ElementAtOrDefault(int.Parse(response.KeyChar.ToString()));
             }
-
-            templateBoardId = selectedBoard.Id;
         }
 
         else
         {
-            templateBoardId = searchResult.Boards.First().Id;
+            selectedBoard = templateSearch.Boards.First();
         }
 
-        GetCardOptions cardOptions = new GetCardOptions()
-        {
-            IncludeList = true
-        };
+        await selectedBoard.Refresh();
 
-        List<Card> templateCards = await trelloClient.GetCardsOnBoardAsync(templateBoardId, cardOptions);
-        List<List> templateLists = await trelloClient.GetListsOnBoardAsync(templateBoardId);
-        
+        List<IList> templateLists = selectedBoard.Lists.ToList();
+
         templateLists = templateLists.OrderBy(x => x.Position).ToList();
-        templateCards = templateCards.Where(x => templateLists.Select(l => l.Id).Contains(x.List.Id)).ToList();
 
-        if (!templateCards.Any())
-            throw new ArgumentException($"No cards will be copied from {templateBoard}");
-        
         if (!templateLists.Any())
             throw new ArgumentException($"No lists will be copied from {templateBoard}");
 
         Console.WriteLine("###############################");
-        Console.WriteLine($"Chosen lists.");
+        Console.WriteLine($"{selectedBoard.Name} found with {templateLists.Count()} lists:");
 
-        
         foreach (List list in templateLists)
         {
             if (targetListNames.Contains(list.Name))
-            {
                 Console.ForegroundColor = ConsoleColor.Green;
-            }           
             else
                 Console.ForegroundColor = ConsoleColor.Red;
-            
+
             Console.WriteLine(list.Name);
         }
+
         Console.ResetColor();
-        
+
         Console.WriteLine("Destination boards:");
 
-        foreach (string board in destinationBoards)
+        foreach (string board in destinationBoardNames)
         {
             Console.WriteLine($" - {board}");
         }
-        
+
         Console.WriteLine("###############################");
         Console.WriteLine("Press y to confirm and continue");
-        
-        if(Console.ReadKey().KeyChar != 'y')
+
+        if (Console.ReadKey().KeyChar != 'y')
+        {
+            Console.WriteLine();
+            Console.WriteLine("Exiting program");
+            Console.WriteLine("Press any key to exit");
+            Console.ReadKey();
             return;
+        }
 
         Console.WriteLine();
 
-        List<string> destinationIds = [];
+        templateLists = templateLists.Where(x => targetListNames.Contains(x.Name)).ToList();
 
-        foreach (string destinationBoard in destinationBoards)
+        List<IBoard> destinationBoards = [];
+
+        foreach (string name in destinationBoardNames)
         {
-            SearchRequest search = new SearchRequest(destinationBoard);
+            ISearch? search = factory.Search(name, null, SearchModelType.Boards, null, false,
+                                             TrelloAuthorization.Default);
 
-            SearchResult result = await trelloClient.SearchAsync(search);
-            
-            if(result.Boards.Count == 1)
-                destinationIds.Add(result.Boards.First().Id);
-            
-            else if (result.Boards.Count == 0)
+            await search.Refresh();
+
+            if (search.Boards.Count() == 1)
+            {
+                destinationBoards.Add(search.Boards.First());
+            }
+
+            else if (search.Boards.Count(x => x.Name == name) == 1)
+            {
+                destinationBoards.Add(search.Boards.First(x => x.Name == name));
+            }
+
+            else if (search.Boards.Count() == 0)
             {
                 Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"Skipping {destinationBoard} - could not find board");
+                Console.WriteLine($"Skipping {name} - could not find board");
                 Console.ResetColor();
             }
 
             else
             {
                 Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"Skipping {destinationBoard} - found {result.Boards.Count} with same name");
+                Console.WriteLine($"Skipping {name} - found {search.Boards.Count()} with same name");
                 Console.ResetColor();
             }
         }
 
-        Console.WriteLine($"Found {destinationIds.Count} out of {destinationBoards.Count} boards");
+        Console.WriteLine($"Found {destinationBoards.Count} out of {destinationBoardNames.Count} boards");
         Console.WriteLine("Starting to copy lists");
 
-        foreach (string id in destinationIds)
+        foreach (IList list in templateLists)
         {
-            await CopyListsOnBoard(id, templateLists, templateCards);
+            await list.Refresh();
         }
-    }
 
-    static async Task CopyListsOnBoard(string targetBoardId, List<List> lists, List<Card> cards)
-    {
-        Dictionary<string, string> listIdConvertion = [];
-
-        List spacerList = new List("New Template Lists ->", targetBoardId)
+        ParallelOptions pOptions = new ParallelOptions
         {
-            NamedPosition = NamedPosition.Bottom
+            MaxDegreeOfParallelism = 4,
+            CancellationToken = default
         };
 
-        await trelloClient.AddListAsync(spacerList);
+        ParallelQuery<IList> parallelTemplateNames = templateLists.AsParallel();
 
-        foreach (List list in lists)
+        await Parallel.ForEachAsync(destinationBoards.AsParallel(),
+                                    pOptions,
+                                    async (board, token) => await CopyListsOnBoard(board, parallelTemplateNames));
+
+        Console.WriteLine("Done!");
+        Console.WriteLine("Press any key to exit");
+        Console.ReadKey();
+    }
+
+    private static async Task CopyListsOnBoard(IBoard targetBoard, ParallelQuery<IList> lists)
+    {
+        Console.ForegroundColor = ConsoleColor.Blue;
+        Console.WriteLine($"Starting {targetBoard.Name}");
+        Console.ResetColor();
+
+        await targetBoard.Lists.Add("New Lists ->", Position.Bottom);
+
+        foreach (IList list1 in lists)
         {
-           List? newList = await trelloClient.AddListAsync(
-                               new List(list.Name, targetBoardId)
-                                   {
-                                       NamedPosition = NamedPosition.Bottom
-                                   }
-                               );
-           
-           listIdConvertion.Add(list.Id, newList.Id);
+            List list = (List)list1;
+
+            await CopyList(targetBoard, list);
         }
 
-        foreach (Card card in cards.OrderBy(x => x.Position))
-        {
-            var cardMoveOptions = new MoveCardToBoardOptions()
-            {
-                LabelOptions = MoveCardToBoardOptionsLabelOptions.MigrateToLabelsOfSameNameAndRemoveMissing,
-                MemberOptions = MoveCardToBoardOptionsMemberOptions.KeepMembersAlsoOnNewBoardAndRemoveRest,
-                NamedPositionOnNewList = NamedPosition.Bottom,
-                NewListId = listIdConvertion[card.List.Id]
-            };
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine($"Finished {targetBoard.Name}");
+        Console.ResetColor();
+    }
 
-            Card newCard = await trelloClient.AddCardAsync(card);
-            await trelloClient.MoveCardToBoard(newCard.Id, targetBoardId, cardMoveOptions);
+    private static async Task CopyList(IBoard targetBoard, IList list)
+    {
+        IList? newList = await targetBoard.Lists.Add(list.Name, Position.Bottom);
+
+        foreach (ICard card in list.Cards.OrderBy(x => x.Position))
+        {
+            await newList.Cards.Add(card, CardCopyKeepFromSourceOptions.All);
+        }
+
+        await newList.Refresh();
+
+        if (newList.Cards.Count() != list.Cards.Count())
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"An error occured while copying {list.Name} to {targetBoard.Name}. {newList.Cards.Count()} out of {list.Cards.Count()} were copied. Please manually fix");
+            Console.ResetColor();
         }
     }
 }

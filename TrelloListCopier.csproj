@@ -9,10 +9,10 @@
     </PropertyGroup>
 
     <ItemGroup>
+      <PackageReference Include="Manatee.Trello" Version="4.4.3" />
       <PackageReference Include="Microsoft.Extensions.Configuration" Version="8.0.0" />
       <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="8.0.2" />
       <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="8.0.1" />
-      <PackageReference Include="TrelloDotNet" Version="1.11.2" />
     </ItemGroup>
 
     <ItemGroup>
