@@ -12,6 +12,7 @@ internal class Program
         string? trelloApiKey    = config.GetRequiredSection("TrelloApiKey").Value;
         string? trelloUserToken = config.GetRequiredSection("TrelloUserToken").Value;
         string? templateBoard   = config.GetRequiredSection("TemplateBoard").Value;
+        bool ignoreTargetLists  = config.GetRequiredSection("IgnoreTargetLists").Get<bool>();
 
         List<string> targetListNames       = config.GetRequiredSection("TargetListNames").Get<List<string>>() ??
                                              throw new ArgumentNullException(nameof(targetListNames));
@@ -101,7 +102,7 @@ internal class Program
 
         foreach (List list in templateLists)
         {
-            if (targetListNames.Contains(list.Name))
+            if (ignoreTargetLists ? !targetListNames.Contains(list.Name) : targetListNames.Contains(list.Name))
                 Console.ForegroundColor = ConsoleColor.Green;
             else
                 Console.ForegroundColor = ConsoleColor.Red;
@@ -132,7 +133,7 @@ internal class Program
 
         Console.WriteLine();
 
-        templateLists = templateLists.Where(x => targetListNames.Contains(x.Name)).ToList();
+        templateLists = templateLists.Where(x => ignoreTargetLists ? !targetListNames.Contains(x.Name) : targetListNames.Contains(x.Name)).ToList();
 
         List<IBoard> destinationBoards = [];
 
