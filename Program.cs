@@ -122,7 +122,7 @@ internal class Program
         Console.WriteLine("###############################");
         Console.WriteLine("Press y to confirm and continue");
 
-        if (Console.ReadKey().KeyChar != 'y')
+        if (!(Console.ReadKey().KeyChar == 'y' || Console.ReadKey().KeyChar != 'Y'))
         {
             Console.WriteLine();
             Console.WriteLine("Exiting program");
